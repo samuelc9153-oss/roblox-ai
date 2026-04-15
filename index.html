@@ -1,0 +1,577 @@
+--[[
+  ╔══════════════════════════════════════════════════════╗
+  ║          RobloxAI Studio Plugin  v1.0                ║
+  ║   Connects Roblox Studio to your RobloxAI backend    ║
+  ╚══════════════════════════════════════════════════════╝
+
+  HOW TO INSTALL:
+  1. Open Roblox Studio
+  2. Go to Plugins tab → Plugins Folder
+  3. Create a new file called "RobloxAI.lua" and paste this whole file in
+  4. OR: Use the Plugin Builder plugin to turn this into a real .rbxm plugin
+  5. Set SERVER_URL below to your Railway/Render URL
+  6. Restart Studio — the RobloxAI button appears in the Plugins tab
+--]]
+
+-- ═══════════════════════════════════════════════════
+--  CONFIG  ← Edit these!
+-- ═══════════════════════════════════════════════════
+local SERVER_URL = "https://YOUR-APP.railway.app"   -- ← paste your deployed URL here
+local PLUGIN_KEY = ""                                -- ← optional password (matches PLUGIN_KEY env var), leave blank if not set
+local DEFAULT_MODEL = "deepseek/deepseek-r1:free"    -- best free model
+-- ═══════════════════════════════════════════════════
+
+local HttpService    = game:GetService("HttpService")
+local Selection      = game:GetService("Selection")
+local ScriptEditorService = game:GetService("ScriptEditorService")
+local StudioService  = game:GetService("StudioService")
+local CoreGui        = game:GetService("CoreGui")
+
+-- ── Plugin toolbar setup ──────────────────────────
+local toolbar     = plugin:CreateToolbar("RobloxAI")
+local toggleBtn   = toolbar:CreateButton(
+    "RobloxAI",
+    "Open the RobloxAI script generator",
+    "rbxassetid://10723408475"   -- robot icon
+)
+
+-- ── Widget (floating panel inside Studio) ────────
+local widgetInfo = DockWidgetPluginGuiInfo.new(
+    Enum.InitialDockState.Right,   -- docks on the right side
+    true,   -- initially enabled
+    false,  -- don't override previous state
+    420,    -- default width
+    680,    -- default height
+    360,    -- min width
+    500     -- min height
+)
+
+local widget = plugin:CreateDockWidgetPluginGui("RobloxAI_Widget", widgetInfo)
+widget.Title = "RobloxAI ✦ Script Builder"
+widget.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+
+-- toggle visibility on button click
+toggleBtn.Click:Connect(function()
+    widget.Enabled = not widget.Enabled
+end)
+
+-- ── Build the UI ──────────────────────────────────
+local ui = Instance.new("Frame")
+ui.Size = UDim2.new(1, 0, 1, 0)
+ui.BackgroundColor3 = Color3.fromHex("#0d1017")
+ui.BorderSizePixel = 0
+ui.Parent = widget
+
+-- rounded corners on outer frame
+local corner = Instance.new("UICorner")
+corner.CornerRadius = UDim.new(0, 0)
+corner.Parent = ui
+
+-- ── Header bar ───────────────────────────────────
+local header = Instance.new("Frame")
+header.Size = UDim2.new(1, 0, 0, 50)
+header.BackgroundColor3 = Color3.fromHex("#111520")
+header.BorderSizePixel = 0
+header.Parent = ui
+
+local headerLine = Instance.new("Frame")
+headerLine.Size = UDim2.new(1, 0, 0, 1)
+headerLine.Position = UDim2.new(0, 0, 1, -1)
+headerLine.BackgroundColor3 = Color3.fromHex("#1e2535")
+headerLine.BorderSizePixel = 0
+headerLine.Parent = header
+
+local logoLabel = Instance.new("TextLabel")
+logoLabel.Size = UDim2.new(0.5, 0, 1, 0)
+logoLabel.Position = UDim2.new(0, 14, 0, 0)
+logoLabel.BackgroundTransparency = 1
+logoLabel.Text = "⬡  RobloxAI"
+logoLabel.TextColor3 = Color3.fromHex("#e2e8f8")
+logoLabel.Font = Enum.Font.GothamBold
+logoLabel.TextSize = 16
+logoLabel.TextXAlignment = Enum.TextXAlignment.Left
+logoLabel.Parent = header
+
+local statusLabel = Instance.new("TextLabel")
+statusLabel.Size = UDim2.new(0.5, -14, 1, 0)
+statusLabel.Position = UDim2.new(0.5, 0, 0, 0)
+statusLabel.BackgroundTransparency = 1
+statusLabel.Text = "● READY"
+statusLabel.TextColor3 = Color3.fromHex("#22c55e")
+statusLabel.Font = Enum.Font.GothamBold
+statusLabel.TextSize = 10
+statusLabel.TextXAlignment = Enum.TextXAlignment.Right
+statusLabel.Parent = header
+
+-- ── Model picker ─────────────────────────────────
+local modelRow = Instance.new("Frame")
+modelRow.Size = UDim2.new(1, 0, 0, 38)
+modelRow.Position = UDim2.new(0, 0, 0, 50)
+modelRow.BackgroundColor3 = Color3.fromHex("#0d1017")
+modelRow.BorderSizePixel = 0
+modelRow.Parent = ui
+
+local modelPad = Instance.new("UIPadding")
+modelPad.PaddingLeft = UDim.new(0, 12)
+modelPad.PaddingRight = UDim.new(0, 12)
+modelPad.Parent = modelRow
+
+local modelLbl = Instance.new("TextLabel")
+modelLbl.Size = UDim2.new(0, 55, 1, 0)
+modelLbl.BackgroundTransparency = 1
+modelLbl.Text = "MODEL"
+modelLbl.TextColor3 = Color3.fromHex("#4a5578")
+modelLbl.Font = Enum.Font.GothamBold
+modelLbl.TextSize = 10
+modelLbl.TextXAlignment = Enum.TextXAlignment.Left
+modelLbl.Parent = modelRow
+
+-- Cycle model button (Studio has no dropdown, so we cycle)
+local models = {
+    "deepseek/deepseek-r1:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "google/gemini-2.0-flash-exp:free",
+    "mistralai/mistral-7b-instruct:free",
+}
+local modelNames = { "DeepSeek R1  ★", "Llama 3.3 70B", "Gemini 2.0 Flash", "Mistral 7B" }
+local currentModelIdx = 1
+
+local modelBtn = Instance.new("TextButton")
+modelBtn.Size = UDim2.new(1, -65, 0, 26)
+modelBtn.Position = UDim2.new(0, 60, 0.5, -13)
+modelBtn.BackgroundColor3 = Color3.fromHex("#161c2a")
+modelBtn.TextColor3 = Color3.fromHex("#6b7ba4")
+modelBtn.Font = Enum.Font.GothamBold
+modelBtn.TextSize = 11
+modelBtn.Text = "⟳  " .. modelNames[1] .. "  (click to change)"
+modelBtn.AutoButtonColor = false
+modelBtn.Parent = modelRow
+
+local mBtnCorner = Instance.new("UICorner")
+mBtnCorner.CornerRadius = UDim.new(0, 6)
+mBtnCorner.Parent = modelBtn
+
+modelBtn.MouseButton1Click:Connect(function()
+    currentModelIdx = (currentModelIdx % #models) + 1
+    modelBtn.Text = "⟳  " .. modelNames[currentModelIdx] .. "  (click to change)"
+end)
+
+-- ── Chat history display ──────────────────────────
+local chatBg = Instance.new("Frame")
+chatBg.Size = UDim2.new(1, 0, 1, -240)
+chatBg.Position = UDim2.new(0, 0, 0, 88)
+chatBg.BackgroundColor3 = Color3.fromHex("#080a0f")
+chatBg.BorderSizePixel = 0
+chatBg.Parent = ui
+
+local chatScroll = Instance.new("ScrollingFrame")
+chatScroll.Size = UDim2.new(1, 0, 1, 0)
+chatScroll.BackgroundTransparency = 1
+chatScroll.BorderSizePixel = 0
+chatScroll.ScrollBarThickness = 3
+chatScroll.ScrollBarImageColor3 = Color3.fromHex("#2a3045")
+chatScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+chatScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+chatScroll.Parent = chatBg
+
+local chatLayout = Instance.new("UIListLayout")
+chatLayout.SortOrder = Enum.SortOrder.LayoutOrder
+chatLayout.Padding = UDim.new(0, 6)
+chatLayout.Parent = chatScroll
+
+local chatPad = Instance.new("UIPadding")
+chatPad.PaddingLeft = UDim.new(0, 10)
+chatPad.PaddingRight = UDim.new(0, 10)
+chatPad.PaddingTop = UDim.new(0, 10)
+chatPad.PaddingBottom = UDim.new(0, 10)
+chatPad.Parent = chatScroll
+
+-- ── Divider ───────────────────────────────────────
+local div = Instance.new("Frame")
+div.Size = UDim2.new(1, 0, 0, 1)
+div.Position = UDim2.new(0, 0, 1, -152)
+div.BackgroundColor3 = Color3.fromHex("#1e2535")
+div.BorderSizePixel = 0
+div.Parent = ui
+
+-- ── Prompt input ──────────────────────────────────
+local inputFrame = Instance.new("Frame")
+inputFrame.Size = UDim2.new(1, 0, 0, 100)
+inputFrame.Position = UDim2.new(0, 0, 1, -151)
+inputFrame.BackgroundColor3 = Color3.fromHex("#111520")
+inputFrame.BorderSizePixel = 0
+inputFrame.Parent = ui
+
+local inputPad = Instance.new("UIPadding")
+inputPad.PaddingLeft = UDim.new(0, 10)
+inputPad.PaddingRight = UDim.new(0, 10)
+inputPad.PaddingTop = UDim.new(0, 8)
+inputPad.PaddingBottom = UDim.new(0, 8)
+inputPad.Parent = inputFrame
+
+local promptBox = Instance.new("TextBox")
+promptBox.Size = UDim2.new(1, 0, 0, 60)
+promptBox.BackgroundColor3 = Color3.fromHex("#161c2a")
+promptBox.TextColor3 = Color3.fromHex("#e2e8f8")
+promptBox.PlaceholderText = "Describe the script you want…  e.g. 'Shop with coins'"
+promptBox.PlaceholderColor3 = Color3.fromHex("#4a5578")
+promptBox.Font = Enum.Font.Gotham
+promptBox.TextSize = 13
+promptBox.TextWrapped = true
+promptBox.MultiLine = true
+promptBox.ClearTextOnFocus = false
+promptBox.BorderSizePixel = 0
+promptBox.Text = ""
+promptBox.Parent = inputFrame
+
+local pbCorner = Instance.new("UICorner")
+pbCorner.CornerRadius = UDim.new(0, 8)
+pbCorner.Parent = promptBox
+
+local pbPad = Instance.new("UIPadding")
+pbPad.PaddingLeft = UDim.new(0, 10)
+pbPad.PaddingRight = UDim.new(0, 10)
+pbPad.PaddingTop = UDim.new(0, 8)
+pbPad.Parent = promptBox
+
+-- ── Bottom button row ─────────────────────────────
+local btnRow = Instance.new("Frame")
+btnRow.Size = UDim2.new(1, 0, 0, 34)
+btnRow.Position = UDim2.new(0, 0, 0, 72)
+btnRow.BackgroundTransparency = 1
+btnRow.Parent = inputFrame
+
+local btnRowLayout = Instance.new("UIListLayout")
+btnRowLayout.FillDirection = Enum.FillDirection.Horizontal
+btnRowLayout.SortOrder = Enum.SortOrder.LayoutOrder
+btnRowLayout.Padding = UDim.new(0, 8)
+btnRowLayout.Parent = btnRow
+
+-- Generate button
+local genBtn = Instance.new("TextButton")
+genBtn.Size = UDim2.new(0.55, 0, 1, 0)
+genBtn.BackgroundColor3 = Color3.fromHex("#ff3c5f")
+genBtn.TextColor3 = Color3.new(1,1,1)
+genBtn.Font = Enum.Font.GothamBold
+genBtn.TextSize = 13
+genBtn.Text = "⚡  Generate"
+genBtn.AutoButtonColor = false
+genBtn.LayoutOrder = 1
+genBtn.Parent = btnRow
+
+local genCorner = Instance.new("UICorner")
+genCorner.CornerRadius = UDim.new(0, 8)
+genCorner.Parent = genBtn
+
+-- Insert into script button
+local insertBtn = Instance.new("TextButton")
+insertBtn.Size = UDim2.new(0.45, -8, 1, 0)
+insertBtn.BackgroundColor3 = Color3.fromHex("#161c2a")
+insertBtn.TextColor3 = Color3.fromHex("#6b7ba4")
+insertBtn.Font = Enum.Font.GothamBold
+insertBtn.TextSize = 12
+insertBtn.Text = "↳  Insert Script"
+insertBtn.AutoButtonColor = false
+insertBtn.LayoutOrder = 2
+insertBtn.Parent = btnRow
+
+local insCorner = Instance.new("UICorner")
+insCorner.CornerRadius = UDim.new(0, 8)
+insCorner.Parent = insertBtn
+
+-- ── Footer ────────────────────────────────────────
+local footer = Instance.new("Frame")
+footer.Size = UDim2.new(1, 0, 0, 36)
+footer.Position = UDim2.new(0, 0, 1, -36)
+footer.BackgroundColor3 = Color3.fromHex("#0d1017")
+footer.BorderSizePixel = 0
+footer.Parent = ui
+
+local footerLine = Instance.new("Frame")
+footerLine.Size = UDim2.new(1, 0, 0, 1)
+footerLine.BackgroundColor3 = Color3.fromHex("#1e2535")
+footerLine.BorderSizePixel = 0
+footerLine.Parent = footer
+
+local footerLbl = Instance.new("TextLabel")
+footerLbl.Size = UDim2.new(1, -20, 1, 0)
+footerLbl.Position = UDim2.new(0, 10, 0, 0)
+footerLbl.BackgroundTransparency = 1
+footerLbl.Text = "RobloxAI Plugin  •  Powered by OpenRouter  •  Free forever"
+footerLbl.TextColor3 = Color3.fromHex("#2a3045")
+footerLbl.Font = Enum.Font.Gotham
+footerLbl.TextSize = 10
+footerLbl.TextXAlignment = Enum.TextXAlignment.Center
+footerLbl.Parent = footer
+
+-- ═══════════════════════════════════════════════════
+--  STATE
+-- ═══════════════════════════════════════════════════
+local conversationHistory = {}
+local lastGeneratedCode   = ""
+local isGenerating        = false
+
+-- ═══════════════════════════════════════════════════
+--  HELPER: add a message bubble to the chat
+-- ═══════════════════════════════════════════════════
+local function addBubble(role, text, order)
+    local isUser = role == "user"
+
+    local bubble = Instance.new("Frame")
+    bubble.Size = UDim2.new(1, 0, 0, 10)
+    bubble.AutomaticSize = Enum.AutomaticSize.Y
+    bubble.BackgroundColor3 = isUser
+        and Color3.fromHex("#1a2540")
+        or  Color3.fromHex("#111520")
+    bubble.BorderSizePixel = 0
+    bubble.LayoutOrder = order
+    bubble.Parent = chatScroll
+
+    local bCorner = Instance.new("UICorner")
+    bCorner.CornerRadius = UDim.new(0, 8)
+    bCorner.Parent = bubble
+
+    local bPad = Instance.new("UIPadding")
+    bPad.PaddingLeft = UDim.new(0, 10)
+    bPad.PaddingRight = UDim.new(0, 10)
+    bPad.PaddingTop = UDim.new(0, 8)
+    bPad.PaddingBottom = UDim.new(0, 8)
+    bPad.Parent = bubble
+
+    local roleTag = Instance.new("TextLabel")
+    roleTag.Size = UDim2.new(1, 0, 0, 14)
+    roleTag.BackgroundTransparency = 1
+    roleTag.Text = isUser and "YOU" or "✦ ROBLOXAI"
+    roleTag.TextColor3 = isUser
+        and Color3.fromHex("#3b82f6")
+        or  Color3.fromHex("#ff3c5f")
+    roleTag.Font = Enum.Font.GothamBold
+    roleTag.TextSize = 9
+    roleTag.TextXAlignment = Enum.TextXAlignment.Left
+    roleTag.LayoutOrder = 1
+    roleTag.Parent = bubble
+
+    local msgLabel = Instance.new("TextLabel")
+    msgLabel.Size = UDim2.new(1, 0, 0, 0)
+    msgLabel.AutomaticSize = Enum.AutomaticSize.Y
+    msgLabel.BackgroundTransparency = 1
+    msgLabel.Text = text
+    msgLabel.TextColor3 = Color3.fromHex("#c8d0e8")
+    msgLabel.Font = Enum.Font.Gotham
+    msgLabel.TextSize = 12
+    msgLabel.TextWrapped = true
+    msgLabel.TextXAlignment = Enum.TextXAlignment.Left
+    msgLabel.RichText = false
+    msgLabel.LayoutOrder = 2
+    msgLabel.Parent = bubble
+
+    -- Use a UIListLayout inside the bubble for vertical stacking
+    local bList = Instance.new("UIListLayout")
+    bList.SortOrder = Enum.SortOrder.LayoutOrder
+    bList.Padding = UDim.new(0, 4)
+    bList.Parent = bubble
+
+    -- Scroll to bottom
+    task.defer(function()
+        chatScroll.CanvasPosition = Vector2.new(0, chatScroll.AbsoluteCanvasSize.Y)
+    end)
+
+    return msgLabel
+end
+
+-- ═══════════════════════════════════════════════════
+--  HELPER: extract first lua code block from response
+-- ═══════════════════════════════════════════════════
+local function extractCode(text)
+    -- Try ```lua or ```luau first
+    local code = text:match("```[Ll]ua[uU]?\n(.-)\n```")
+    if not code then
+        code = text:match("```lua\n(.-)\n```")
+    end
+    if not code then
+        -- any code block
+        code = text:match("```[^\n]*\n(.-)\n```")
+    end
+    -- fallback: entire response
+    return code or text
+end
+
+-- ═══════════════════════════════════════════════════
+--  HELPER: create a Script instance in selected object or ServerScriptService
+-- ═══════════════════════════════════════════════════
+local function insertScript(code)
+    local parent
+    local selected = Selection:Get()
+    if selected and #selected > 0 then
+        parent = selected[1]
+    else
+        parent = game:GetService("ServerScriptService")
+    end
+
+    local s = Instance.new("Script")
+    s.Source = code
+    s.Name = "RobloxAI_Script"
+    s.Parent = parent
+
+    -- Open it in the script editor
+    plugin:OpenScript(s)
+
+    return s
+end
+
+-- ═══════════════════════════════════════════════════
+--  CORE: call your backend
+-- ═══════════════════════════════════════════════════
+local bubbleOrder = 0
+
+local function generate(prompt)
+    if isGenerating then return end
+    if prompt == "" then return end
+    isGenerating = true
+
+    -- Disable button, update status
+    genBtn.Text = "⏳  Thinking…"
+    genBtn.BackgroundColor3 = Color3.fromHex("#3b3040")
+    statusLabel.Text = "● GENERATING"
+    statusLabel.TextColor3 = Color3.fromHex("#f59e0b")
+
+    -- Add user bubble
+    bubbleOrder += 1
+    addBubble("user", prompt, bubbleOrder)
+
+    -- Build payload
+    local payload = {
+        prompt  = prompt,
+        model   = models[currentModelIdx],
+        apiKey  = PLUGIN_KEY,
+        history = conversationHistory,
+    }
+
+    -- Run HTTP call on a separate thread so Studio doesn't freeze
+    task.spawn(function()
+        local ok, result = pcall(function()
+            local body = HttpService:JSONEncode(payload)
+            local response = HttpService:RequestAsync({
+                Url    = SERVER_URL .. "/api/plugin",
+                Method = "POST",
+                Headers = { ["Content-Type"] = "application/json" },
+                Body   = body,
+            })
+            if not response.Success then
+                error("HTTP " .. response.StatusCode .. ": " .. response.Body)
+            end
+            return HttpService:JSONDecode(response.Body)
+        end)
+
+        -- Back on main thread for UI updates
+        task.defer(function()
+            isGenerating = false
+            genBtn.Text = "⚡  Generate"
+            genBtn.BackgroundColor3 = Color3.fromHex("#ff3c5f")
+
+            if not ok then
+                statusLabel.Text = "● ERROR"
+                statusLabel.TextColor3 = Color3.fromHex("#ef4444")
+                bubbleOrder += 1
+                addBubble("ai",
+                    "⚠ Error: " .. tostring(result) ..
+                    "\n\nMake sure:\n1. SERVER_URL is set correctly at top of plugin\n2. Your server is running\n3. HttpService is enabled in Game Settings → Security",
+                    bubbleOrder
+                )
+                return
+            end
+
+            statusLabel.Text = "● READY"
+            statusLabel.TextColor3 = Color3.fromHex("#22c55e")
+
+            local text = result.result or "(no response)"
+            local modelUsed = result.model or models[currentModelIdx]
+
+            -- Store in history for follow-up questions
+            table.insert(conversationHistory, { role = "user",      content = prompt })
+            table.insert(conversationHistory, { role = "assistant", content = text   })
+            -- Keep history to last 10 turns to avoid huge payloads
+            while #conversationHistory > 20 do
+                table.remove(conversationHistory, 1)
+            end
+
+            -- Store code for Insert button
+            lastGeneratedCode = extractCode(text)
+
+            -- Show abbreviated model name
+            local shortModel = modelUsed:match("/([^:]+)") or modelUsed
+
+            -- Display response bubble
+            bubbleOrder += 1
+            local lbl = addBubble("ai", text .. "\n\n[Model: " .. shortModel .. "]", bubbleOrder)
+
+            -- Enable insert button
+            insertBtn.TextColor3 = Color3.fromHex("#22c55e")
+            insertBtn.Text = "↳  Insert Script"
+        end)
+    end)
+end
+
+-- ═══════════════════════════════════════════════════
+--  EVENTS
+-- ═══════════════════════════════════════════════════
+
+genBtn.MouseButton1Click:Connect(function()
+    local txt = promptBox.Text:match("^%s*(.-)%s*$")
+    if txt == "" then return end
+    promptBox.Text = ""
+    generate(txt)
+end)
+
+-- Also send on Enter (Ctrl+Enter)
+promptBox.FocusLost:Connect(function(enterPressed)
+    if enterPressed then
+        local txt = promptBox.Text:match("^%s*(.-)%s*$")
+        if txt ~= "" then
+            promptBox.Text = ""
+            generate(txt)
+        end
+    end
+end)
+
+insertBtn.MouseButton1Click:Connect(function()
+    if lastGeneratedCode == "" then
+        insertBtn.Text = "⚠  Nothing yet"
+        task.delay(2, function() insertBtn.Text = "↳  Insert Script" end)
+        return
+    end
+    local s = insertScript(lastGeneratedCode)
+    insertBtn.Text = "✓  Inserted!"
+    insertBtn.BackgroundColor3 = Color3.fromHex("#14532d")
+    task.delay(2.5, function()
+        insertBtn.Text = "↳  Insert Script"
+        insertBtn.BackgroundColor3 = Color3.fromHex("#161c2a")
+    end)
+end)
+
+-- Button hover effects
+genBtn.MouseEnter:Connect(function()
+    genBtn.BackgroundColor3 = Color3.fromHex("#ff5577")
+end)
+genBtn.MouseLeave:Connect(function()
+    if not isGenerating then
+        genBtn.BackgroundColor3 = Color3.fromHex("#ff3c5f")
+    end
+end)
+
+insertBtn.MouseEnter:Connect(function()
+    insertBtn.BackgroundColor3 = Color3.fromHex("#1e2a40")
+end)
+insertBtn.MouseLeave:Connect(function()
+    insertBtn.BackgroundColor3 = Color3.fromHex("#161c2a")
+end)
+
+-- ── Welcome message on open ───────────────────────
+bubbleOrder += 1
+addBubble("ai",
+    "👋 Hey! I'm RobloxAI.\n\n" ..
+    "Ask me to build any script — combat systems, shops, pets, tycoons, data saving, GUIs, and more.\n\n" ..
+    "Hit ⚡ Generate or press Enter. When done, click ↳ Insert Script to drop it straight into Studio!\n\n" ..
+    "Tip: select an object in the Explorer before inserting and the script will be placed inside it.",
+    bubbleOrder
+)
